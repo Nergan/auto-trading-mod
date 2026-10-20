@@ -24,14 +24,13 @@ import net.minecraft.world.Container
 import net.minecraft.world.item.BlockItem
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.trading.MerchantOffer
+import net.minecraft.world.level.block.ChestBlock
 import net.minecraft.world.level.block.CraftingTableBlock
 import net.minecraft.world.level.block.EnderChestBlock
+import net.minecraft.world.level.block.state.properties.ChestType
 import net.minecraft.world.level.entity.EntityTypeTest
 import net.minecraft.world.phys.AABB
-import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.EntityHitResult
-import net.minecraft.world.phys.Vec3
-import net.minecraft.core.Direction
 
 object Session {
     private enum class Phase { DISABLED, INPUTS, VILLAGERS, OUTPUTS }
@@ -67,6 +66,7 @@ object Session {
     private var tradeFails = 0
     private var sawLocked = false
     private val told = HashSet<String>()
+    private var autoJumpWas: Boolean? = null
 
     private var inputs = emptyList<Mark>()
     private var villagers = emptyList<VillagerMark>()
@@ -279,9 +279,11 @@ object Session {
             return
         }
         if (!Settings.enabled) {
+            restoreAutoJump(minecraft)
             move = null
             return
         }
+        suppressAutoJump(minecraft)
         if (minecraft.isPaused || foreign(minecraft)) {
             move = null
             return
@@ -358,8 +360,8 @@ object Session {
             skip(minecraft)
             return
         }
-        val reach = if (mode == Mode.SELL) 3.2 else 4.5
-        val steered = Walker.steer(level, player, pos, reach)
+        val focus = if (mode == Mode.SELL) villagers.getOrNull(cursor)?.let { findVillager(level, it) } else null
+        val steered = Walker.steer(level, player, pos, focus)
         if (steered == null) {
             Alerts.show("autotrading.notice.path")
             skip(minecraft)
@@ -569,9 +571,7 @@ object Session {
         }
         val mark = (if (mode == Mode.FETCH) inputs else outputs).getOrNull(cursor) ?: return false
         val pos = BlockPos(mark.x, mark.y, mark.z)
-        val face = faceTowardPlayer(player, pos)
-        val center = Vec3.atCenterOf(pos)
-        val hit = BlockHitResult(center.add(face.stepX * 0.5, face.stepY * 0.5, face.stepZ * 0.5), face, pos, false)
+        val hit = Walker.blockHit(level, player, pos) ?: return false
         gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit)
         return true
     }
@@ -596,7 +596,7 @@ object Session {
     private fun findVillager(level: net.minecraft.world.level.Level, mark: VillagerMark): AbstractVillager? {
         val box = AABB(mark.x - 64.0, mark.y - 32.0, mark.z - 64.0, mark.x + 65.0, mark.y + 32.0, mark.z + 65.0)
         return level.getEntities(EntityTypeTest.forClass(AbstractVillager::class.java), box) { entity ->
-            entity.stringUUID == mark.uuid
+            entity.stringUUID.equals(mark.uuid, true)
         }.firstOrNull()
     }
 
@@ -641,6 +641,7 @@ object Session {
         job = Job.IDLE
         move = null
         Walker.clear()
+        restoreAutoJump(minecraft)
         openedByMod = false
         reopenChat = false
         restoreChat = false
@@ -668,16 +669,43 @@ object Session {
                 return
             }
             pendingPos = null
-            val mark = Mark(dim, pos.x, pos.y, pos.z)
+            val stored = canonicalChest(level, pos)
+            val mark = Mark(dim, stored.x, stored.y, stored.z)
             val list = if (phase == Phase.INPUTS) draftInputs else draftOutputs
             if (list.none { it == mark }) list.add(mark)
         }
         if (phase == Phase.VILLAGERS && screen is MerchantScreen) {
             val entity = pendingEntity as? AbstractVillager ?: return
+            pendingEntity = null
             val pos = entity.blockPosition()
-            val mark = VillagerMark(dim, entity.stringUUID, pos.x, pos.y, pos.z)
-            if (draftVillagers.none { it.uuid == mark.uuid }) draftVillagers.add(mark)
+            val uuid = entity.stringUUID
+            val mark = VillagerMark(dim, uuid, pos.x, pos.y, pos.z)
+            if (draftVillagers.none { sameVillager(it, uuid, pos) }) draftVillagers.add(mark)
         }
+    }
+
+    private fun canonicalChest(level: net.minecraft.world.level.Level, pos: BlockPos): BlockPos {
+        val state = level.getBlockState(pos)
+        if (state.block !is ChestBlock || state.getValue(ChestBlock.TYPE) == ChestType.SINGLE) return pos
+        val other = ChestBlock.getConnectedBlockPos(pos, state)
+        return if (other.asLong() < pos.asLong()) other else pos
+    }
+
+    private fun sameVillager(saved: VillagerMark, uuid: String, pos: BlockPos): Boolean {
+        if (saved.uuid.equals(uuid, true)) return true
+        return saved.x == pos.x && saved.y == pos.y && saved.z == pos.z
+    }
+
+    private fun suppressAutoJump(minecraft: Minecraft) {
+        val option = minecraft.options.autoJump()
+        if (autoJumpWas == null) autoJumpWas = option.get()
+        if (option.get()) option.set(false)
+    }
+
+    private fun restoreAutoJump(minecraft: Minecraft) {
+        val previous = autoJumpWas ?: return
+        minecraft.options.autoJump().set(previous)
+        autoJumpWas = null
     }
 
     private fun stopped(): Boolean = Minecraft.getInstance().gui.screen() is PauseScreen
@@ -686,20 +714,6 @@ object Session {
         if (level.getBlockEntity(pos) is Container) return true
         val block = level.getBlockState(pos).block
         return block is CraftingTableBlock || block is EnderChestBlock
-    }
-
-    private fun faceTowardPlayer(player: Player, pos: BlockPos): Direction {
-        val dx = player.x - (pos.x + 0.5)
-        val dy = player.eyeY - (pos.y + 0.5)
-        val dz = player.z - (pos.z + 0.5)
-        val ax = kotlin.math.abs(dx)
-        val ay = kotlin.math.abs(dy)
-        val az = kotlin.math.abs(dz)
-        return when {
-            ax >= ay && ax >= az -> if (dx > 0) Direction.EAST else Direction.WEST
-            ay >= ax && ay >= az -> if (dy > 0) Direction.UP else Direction.DOWN
-            else -> if (dz > 0) Direction.SOUTH else Direction.NORTH
-        }
     }
 
     private fun foreign(minecraft: Minecraft): Boolean {

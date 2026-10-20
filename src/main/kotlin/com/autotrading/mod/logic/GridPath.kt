@@ -5,8 +5,9 @@ import java.util.PriorityQueue
 data class Cell(val x: Int, val y: Int, val z: Int)
 
 /**
- * Feet positions. [open] is a block the body can occupy, [floor] is a block to stand on.
- * shortcut: one-block jumps and drops up to three, no ladders or water.
+ * Feet positions. [open] is a block the body can occupy, [floor] is a block that supports feet.
+ * A partial floor such as a bottom slab supports the cell it occupies, even with air below.
+ * shortcut: one-block jumps and drops up to three. Ladders and water are handled by the callbacks.
  */
 fun findPath(
     open: (Int, Int, Int) -> Boolean,
@@ -43,8 +44,10 @@ fun findPath(
     return null
 }
 
-internal fun stand(open: (Int, Int, Int) -> Boolean, floor: (Int, Int, Int) -> Boolean, cell: Cell): Boolean =
-    floor(cell.x, cell.y - 1, cell.z) && open(cell.x, cell.y, cell.z) && open(cell.x, cell.y + 1, cell.z)
+internal fun stand(open: (Int, Int, Int) -> Boolean, floor: (Int, Int, Int) -> Boolean, cell: Cell): Boolean {
+    if (!open(cell.x, cell.y, cell.z) || !open(cell.x, cell.y + 1, cell.z)) return false
+    return floor(cell.x, cell.y - 1, cell.z) || floor(cell.x, cell.y, cell.z)
+}
 
 private fun neighbors(open: (Int, Int, Int) -> Boolean, floor: (Int, Int, Int) -> Boolean, cell: Cell): List<Pair<Cell, Int>> {
     val found = ArrayList<Pair<Cell, Int>>(12)
