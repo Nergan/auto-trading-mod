@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "com.autotrading.mod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "ClientInputAccessor",
+    "KeyboardInputMixin",
+    "GameModeMixin",
+    "HudMixin",
+    "ScreenMixin",
+    "MouseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

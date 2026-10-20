@@ -1,0 +1,87 @@
+name: Sync to GitLab
+
+on:
+  push:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+concurrency:
+  group: gitlab-sync-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror repository to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GITLAB_TOKEN}" ]; then
+            echo "Secret GITLAB_TOKEN is missing on this repository."
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE}" = "true" ]; then
+            visibility="private"
+          else
+            visibility="public"
+          fi
+
+          encoded="$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote("naragan/" + os.environ["REPO_NAME"], safe=""))')"
+          # /users returns the account id. Project creation needs the personal namespace id, which is a different number.
+          namespace_code="$(curl -sS -o /tmp/gitlab-namespace.json -w "%{http_code}" --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://gitlab.com/api/v4/namespaces/naragan")"
+          namespace_id="$(python3 -c 'import json; row=json.load(open("/tmp/gitlab-namespace.json", encoding="utf-8")); print(row.get("id") or "")' 2>/dev/null || true)"
+          if [ "${namespace_code}" != "200" ] || [ -z "${namespace_id}" ]; then
+            echo "GitLab namespace naragan lookup failed with HTTP ${namespace_code}."
+            python3 -c 'import pathlib; print(pathlib.Path("/tmp/gitlab-namespace.json").read_text(encoding="utf-8", errors="replace")[:2000])'
+            exit 1
+          fi
+
+          lookup_code="$(curl -sS -o /tmp/gitlab-project.json -w "%{http_code}" --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://gitlab.com/api/v4/projects/${encoded}")"
+          if [ "${lookup_code}" = "404" ]; then
+            create_code="$(curl -sS -o /tmp/gitlab-create.json -w "%{http_code}" --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --data-urlencode "name=${REPO_NAME}" --data-urlencode "path=${REPO_NAME}" --data-urlencode "namespace_id=${namespace_id}" --data-urlencode "visibility=${visibility}" --data "initialize_with_readme=false" "https://gitlab.com/api/v4/projects")"
+            if [ "${create_code}" != "201" ]; then
+              echo "GitLab project create failed with HTTP ${create_code}."
+              python3 -c 'import pathlib; print(pathlib.Path("/tmp/gitlab-create.json").read_text(encoding="utf-8", errors="replace")[:2000])'
+              exit 1
+            fi
+            echo "Created GitLab project naragan/${REPO_NAME} (${visibility})."
+          elif [ "${lookup_code}" != "200" ]; then
+            echo "GitLab project lookup failed with HTTP ${lookup_code}."
+            python3 -c 'import pathlib; print(pathlib.Path("/tmp/gitlab-project.json").read_text(encoding="utf-8", errors="replace")[:2000])'
+            exit 1
+          else
+            echo "GitLab project naragan/${REPO_NAME} already exists."
+          fi
+
+          python3 -c 'open("/tmp/git-askpass.sh","w",encoding="utf-8").write("#!/bin/sh\ncase \"$1\" in\n  *Username*) printf \"%s\\n\" \"oauth2\" ;;\n  *) printf \"%s\\n\" \"$GITLAB_TOKEN\" ;;\nesac\n")'
+          chmod 700 /tmp/git-askpass.sh
+          trap 'rm -f /tmp/git-askpass.sh' EXIT
+          export GIT_ASKPASS=/tmp/git-askpass.sh
+          export GIT_TERMINAL_PROMPT=0
+          git remote remove gitlab 2>/dev/null || true
+          git remote add gitlab "https://gitlab.com/naragan/${REPO_NAME}.git"
+          git push --prune gitlab "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"
+          if ! curl -sS --fail --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --data-urlencode "default_branch=${DEFAULT_BRANCH}" "https://gitlab.com/api/v4/projects/${encoded}" >/tmp/gitlab-default.json; then
+            echo "Could not set the default branch. The repository was still mirrored."
+          fi
+          echo "Mirrored naragan/${REPO_NAME}."
+          export GITLAB_PROJECT="naragan/${REPO_NAME}"
+          python3 .github/scripts/gitlab_releases.py
