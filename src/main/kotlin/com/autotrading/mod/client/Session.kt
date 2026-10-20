@@ -1,11 +1,16 @@
 package com.autotrading.mod.client
 
 import com.autotrading.mod.logic.OfferView
+import com.autotrading.mod.logic.Pile
+import com.autotrading.mod.logic.Price
+import com.autotrading.mod.logic.Recipe
 import com.autotrading.mod.logic.Step
 import com.autotrading.mod.logic.canPay
 import com.autotrading.mod.logic.fit
 import com.autotrading.mod.logic.keepsReserve
+import com.autotrading.mod.logic.keepsSale
 import com.autotrading.mod.logic.nextStep
+import com.autotrading.mod.logic.saleFits
 import com.autotrading.mod.logic.StockKind
 import com.autotrading.mod.logic.definitelyEmpty
 import com.autotrading.mod.logic.noteEmpty
@@ -22,12 +27,12 @@ import net.minecraft.client.gui.screens.inventory.MerchantScreen
 import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
+import net.minecraft.resources.Identifier
 import net.minecraft.network.protocol.game.ServerboundSelectTradePacket
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.npc.villager.AbstractVillager
 import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader
-import net.minecraft.world.entity.player.Inventory
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.inventory.ContainerInput
 import net.minecraft.world.Container
@@ -456,14 +461,24 @@ object Session {
         val recipe = Settings.recipe()
         if (tradeStep == 1) {
             val result = menu.slots.getOrNull(2)?.item
-            val filled = result != null && !result.isEmpty
             val ready = menu.stateId != tradeState || clock - tradeMarked >= Settings.paceTicks() * 3
-            if (filled && ready) {
-                tradeSnapshot = count(player, recipe.result)
-                clickSlot(minecraft, player, 2)
-                tradeStep = 2
-                pendingAt = clock + Settings.paceTicks()
-                return
+            if (result != null && !result.isEmpty && ready) {
+                val staged = listOf(0, 1).map { index -> pileOf(menu.slots.getOrNull(index)?.item) }
+                val prices = prices(recipe)
+                val stagedEnough = prices.all { price ->
+                    staged.sumOf { if (it.item == price.item) it.count else 0 } >= price.count
+                }
+                if (stagedEnough) {
+                    if (!keepsSale(piles(player), staged, prices, idOf(result), result.count, result.maxStackSize.coerceAtLeast(1))) {
+                        deferTrade(minecraft, player)
+                        return
+                    }
+                    tradeSnapshot = count(player, recipe.result)
+                    clickSlot(minecraft, player, 2)
+                    tradeStep = 2
+                    pendingAt = clock + Settings.paceTicks()
+                    return
+                }
             }
             if (clock - tradeMarked < Settings.paceTicks() * 4) return
             tradeFails++
@@ -480,12 +495,8 @@ object Session {
             return
         }
         val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
-        val resultFits = fits(player, recipe.result, recipe.resultCount)
-        if (!payable || !resultFits) {
-            closeWork(minecraft)
-            resumeSell = cursor
-            if (Settings.deposit.sumOf { count(player, it) } > 0) startWalk(minecraft, Mode.STORE, 0)
-            else afterVillagers(minecraft, player)
+        if (!payable || !resultFits(player)) {
+            deferTrade(minecraft, player)
             return
         }
         var match = -1
@@ -647,9 +658,8 @@ object Session {
     private fun afterInputs(minecraft: Minecraft, player: Player) {
         val recipe = Settings.recipe()
         val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
-        val resultFits = fits(player, recipe.result, recipe.resultCount)
         when {
-            payable && resultFits -> {
+            payable && resultFits(player) -> {
                 val index = resumeSell.takeIf { it in villagers.indices } ?: 0
                 resumeSell = -1
                 startWalk(minecraft, Mode.SELL, index)
@@ -675,7 +685,7 @@ object Session {
         val recipe = Settings.recipe()
         if (resumeSell in villagers.indices &&
             canPay(count(player, recipe.costA), count(player, recipe.costB), recipe) &&
-            fits(player, recipe.result, recipe.resultCount)
+            resultFits(player)
         ) {
             val index = resumeSell
             resumeSell = -1
@@ -778,7 +788,7 @@ object Session {
             emptySlots(player),
             hasPartialPickup(player),
             canPay(count(player, recipe.costA), count(player, recipe.costB), recipe),
-            fits(player, recipe.result, recipe.resultCount),
+            resultFits(player),
             Settings.deposit.sumOf { count(player, it) },
         )
     }
@@ -924,21 +934,40 @@ object Session {
         return stacks(player).filter { idOf(it) == id }.sumOf { it.count }
     }
 
-    private fun fits(player: Player, id: String, need: Int): Boolean {
-        if (need <= 0) return true
-        var space = 0
-        for (stack in stacks(player)) {
-            if (stack.isEmpty) space += 64
-            else if (idOf(stack) == id) space += (stack.maxStackSize - stack.count).coerceAtLeast(0)
-            if (space >= need) return true
-        }
-        return false
+    private fun deferTrade(minecraft: Minecraft, player: Player) {
+        tradeStep = 0
+        closeWork(minecraft)
+        resumeSell = cursor
+        if (Settings.deposit.sumOf { count(player, it) } > 0) startWalk(minecraft, Mode.STORE, 0)
+        else afterVillagers(minecraft, player)
     }
 
-    private fun stacks(player: Player): List<ItemStack> {
-        val inventory = player.inventory
-        return inventory.nonEquipmentItems + inventory.getItem(Inventory.SLOT_OFFHAND)
+    private fun resultFits(player: Player): Boolean {
+        val recipe = Settings.recipe()
+        return saleFits(piles(player), prices(recipe), recipe.result, recipe.resultCount, stackLimit(player, recipe.result))
     }
+
+    private fun prices(recipe: Recipe): List<Price> = buildList {
+        if (recipe.costA.isNotBlank() && recipe.costACount > 0) add(Price(recipe.costA, recipe.costACount))
+        if (recipe.costB.isNotBlank() && recipe.costBCount > 0) add(Price(recipe.costB, recipe.costBCount))
+    }
+
+    private fun piles(player: Player): List<Pile> = stacks(player).map { pileOf(it) }
+
+    private fun pileOf(stack: ItemStack?): Pile {
+        if (stack == null || stack.isEmpty) return Pile("", 0, 1)
+        return Pile(idOf(stack), stack.count, stack.maxStackSize.coerceAtLeast(1))
+    }
+
+    private fun stackLimit(player: Player, id: String): Int {
+        stacks(player).firstOrNull { !it.isEmpty && idOf(it) == id }?.let { return it.maxStackSize.coerceAtLeast(1) }
+        val parsed = Identifier.tryParse(id) ?: return 64
+        if (!BuiltInRegistries.ITEM.containsKey(parsed)) return 64
+        return ItemStack(BuiltInRegistries.ITEM.getValue(parsed)).maxStackSize.coerceAtLeast(1)
+    }
+
+    /** Chest shift-click and the trade result only land in these 36 slots. */
+    private fun stacks(player: Player): List<ItemStack> = player.inventory.nonEquipmentItems
 
     private fun idOf(stack: ItemStack): String {
         if (stack.isEmpty) return ""
