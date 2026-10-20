@@ -14,6 +14,7 @@ import net.minecraft.client.gui.screens.inventory.MerchantScreen
 import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
+import net.minecraft.network.protocol.game.ServerboundSelectTradePacket
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.npc.villager.AbstractVillager
@@ -64,6 +65,9 @@ object Session {
     private var pendingAt = 0
     private var tradeStep = 0
     private var tradeFails = 0
+    private var tradeMarked = 0
+    private var tradeState = 0
+    private var tradeSnapshot = 0
     private var sawLocked = false
     private val told = HashSet<String>()
     private var autoJumpWas: Boolean? = null
@@ -73,7 +77,7 @@ object Session {
     private var outputs = emptyList<Mark>()
 
     fun statusText(): String = when {
-        stopped() -> "autotrading: stop"
+        Settings.enabled && stopped() -> "autotrading: stop"
         Settings.enabled -> "autotrading: enabled"
         phase == Phase.INPUTS -> "autotrading: setting input containers..."
         phase == Phase.VILLAGERS -> "autotrading: setting trade villagers..."
@@ -82,15 +86,15 @@ object Session {
     }
 
     fun statusColor(): Int = when {
-        stopped() -> 0xFFFFAA00.toInt()
+        Settings.enabled && stopped() -> 0xFFFFAA00.toInt()
         Settings.enabled -> 0xFF55FF55.toInt()
         phase == Phase.DISABLED -> 0xFFFF5555.toInt()
         else -> 0xFFFFFF55.toInt()
     }
 
     fun canToggleFromStatus(): Boolean {
-        if (stopped()) return false
         if (Settings.enabled) return true
+        if (stopped()) return false
         return phase == Phase.DISABLED && Minecraft.getInstance().level != null
     }
 
@@ -405,10 +409,13 @@ object Session {
                 Mode.SELL -> "autotrading.action.trading"
                 Mode.STORE -> "autotrading.action.putting"
             }
+            pendingAt = clock + Settings.paceTicks()
+            tradeStep = 0
             return
         }
         if (screen != null) return
         if (!interacted) {
+            if (clock - openSince < Settings.paceTicks()) return
             if (!interact(minecraft, player, level)) {
                 once("missing:" + targetKey()) {
                     Alerts.show(if (mode == Mode.SELL) "autotrading.notice.missing_villager" else "autotrading.notice.missing_container")
@@ -420,7 +427,7 @@ object Session {
             openSince = clock
             return
         }
-        if (clock - openSince > 20) {
+        if (clock - openSince > Settings.paceTicks() * 4 + 20) {
             once("missing:" + targetKey()) {
                 Alerts.show(if (mode == Mode.SELL) "autotrading.notice.missing_villager" else "autotrading.notice.missing_container")
             }
@@ -449,6 +456,7 @@ object Session {
             if (clock < pendingAt) return
             pendingSlot = -1
         }
+        if (clock < pendingAt) return
         val menu = player.containerMenu
         val slot = menu.slots.withIndex().firstOrNull { (_, entry) ->
             entry.container !== player.inventory && Settings.pickup.contains(idOf(entry.item))
@@ -460,7 +468,7 @@ object Session {
         }
         clickSlot(minecraft, player, slot.index)
         pendingSlot = slot.index
-        pendingAt = clock + 3
+        pendingAt = clock + Settings.paceTicks()
     }
 
     private fun trade(minecraft: Minecraft, player: Player) {
@@ -471,27 +479,34 @@ object Session {
             skip(minecraft)
             return
         }
+        if (clock < pendingAt) return
         val menu = screen.menu
+        val recipe = Settings.recipe()
         if (tradeStep == 1) {
-            if (clock < pendingAt) return
             val result = menu.slots.getOrNull(2)?.item
-            if (result != null && !result.isEmpty) {
+            val filled = result != null && !result.isEmpty
+            val ready = menu.stateId != tradeState || clock - tradeMarked >= Settings.paceTicks() * 3
+            if (filled && ready) {
+                tradeSnapshot = count(player, recipe.result)
                 clickSlot(minecraft, player, 2)
                 tradeStep = 2
-                pendingAt = clock + 4
-                tradeFails = 0
+                pendingAt = clock + Settings.paceTicks()
                 return
             }
+            if (clock - tradeMarked < Settings.paceTicks() * 4) return
             tradeFails++
             tradeStep = 0
-            if (tradeFails >= 3) skip(minecraft)
+            pendingAt = clock + Settings.paceTicks()
+            if (tradeFails >= 4) skip(minecraft)
             return
         }
         if (tradeStep == 2) {
-            if (clock < pendingAt) return
+            if (count(player, recipe.result) > tradeSnapshot) tradeFails = 0 else tradeFails++
             tradeStep = 0
+            pendingAt = clock + Settings.paceTicks()
+            if (tradeFails >= 4) skip(minecraft)
+            return
         }
-        val recipe = Settings.recipe()
         if (!canPay(count(player, recipe.costA), count(player, recipe.costB), recipe) || !fits(player, recipe.result, recipe.resultCount)) {
             closeWork(minecraft)
             job = Job.CHOOSE
@@ -514,10 +529,23 @@ object Session {
             skip(minecraft)
             return
         }
-        menu.setSelectionHint(match)
-        menu.tryMoveItems(match)
+        selectOffer(screen, match)
         tradeStep = 1
-        pendingAt = clock + 4
+        tradeState = menu.stateId
+        tradeMarked = clock
+        pendingAt = clock + Settings.paceTicks()
+    }
+
+    private fun selectOffer(screen: MerchantScreen, index: Int) {
+        runCatching {
+            val field = MerchantScreen::class.java.getDeclaredField("shopItem")
+            field.isAccessible = true
+            field.setInt(screen, index)
+        }
+        val menu = screen.menu
+        menu.setSelectionHint(index)
+        menu.tryMoveItems(index)
+        Minecraft.getInstance().connection?.send(ServerboundSelectTradePacket(index))
     }
 
     private fun put(minecraft: Minecraft, player: Player) {
@@ -546,6 +574,7 @@ object Session {
             }
             return
         }
+        if (clock < pendingAt) return
         val slot = menu.slots.withIndex().firstOrNull { (_, entry) ->
             entry.container === player.inventory && Settings.deposit.contains(idOf(entry.item))
         }
@@ -556,7 +585,7 @@ object Session {
         }
         pendingSlot = slot.index
         pendingCount = slot.value.item.count
-        pendingAt = clock + 5
+        pendingAt = clock + Settings.paceTicks()
         clickSlot(minecraft, player, slot.index)
     }
 

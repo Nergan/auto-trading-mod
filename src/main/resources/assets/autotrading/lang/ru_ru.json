@@ -13,6 +13,8 @@
   "autotrading.configuration.result": "Результат сделки",
   "autotrading.configuration.result_count": "Количество результата",
   "autotrading.configuration.deposit": "Предметы для выходных контейнеров",
+  "autotrading.configuration.pace": "Пауза между действиями",
+  "autotrading.configuration.pace.tooltip": "Тики между кликами. 20 — это секунда.",
   "autotrading.notice.locked": "Пока автоторговля включена, управление заблокировано.",
   "autotrading.notice.died": "Автоторговля остановилась: игрок умер.",
   "autotrading.notice.path": "Автоторговля не может проложить путь до цели.",

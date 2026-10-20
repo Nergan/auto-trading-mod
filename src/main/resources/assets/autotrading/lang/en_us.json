@@ -13,6 +13,8 @@
   "autotrading.configuration.result": "Trade result item",
   "autotrading.configuration.result_count": "Trade result count",
   "autotrading.configuration.deposit": "Items to put into output containers",
+  "autotrading.configuration.pace": "Delay between actions",
+  "autotrading.configuration.pace.tooltip": "Ticks between clicks. 20 is one second.",
   "autotrading.notice.locked": "Controls are locked while autotrading is enabled.",
   "autotrading.notice.died": "Autotrading stopped because the player died.",
   "autotrading.notice.path": "Autotrading cannot find a path to the target.",

@@ -51,8 +51,8 @@ The panel starts as `autotrading: disabled`. Press `T` to open chat: that frees 
 3. The status becomes `autotrading: setting trade villagers...`. Right-click each villager, then `apply`. The trade screen still opens.
 4. The status becomes `autotrading: setting output containers...`. Right-click each output container, then `apply`. The status returns to `autotrading: disabled`, and the button returns to `set trading`.
 5. `cancel` at any of these steps drops the draft. A route saved earlier stays. `apply` does nothing while the other button says `set trading`, and it also does nothing until the current step has at least one target.
-6. Click the status line `autotrading: disabled`. It becomes `autotrading: enabled` and both buttons lock. Click `autotrading: enabled` to turn it off. The **Run the route** switch in Mod Menu does the same thing. The character walks the containers and villagers: it takes the configured items, buys the configured offer, and puts the configured results into the output containers in order. It stops at the first output that can take what is left.
-7. While the route is running, movement, jump, sneak, attack, use, drop, inventory, and the hotbar are locked. Chat, the command key, the player list, screenshots, and fullscreen stay available. `Esc` opens the pause menu, the status becomes `autotrading: stop`, and the route waits until that menu closes. Death turns the route off as well.
+6. Click the status line `autotrading: disabled`. It becomes `autotrading: enabled` and both buttons lock. Click `autotrading: enabled` to turn it off. The **Run the route** switch in Mod Menu does the same thing. The character walks the containers and villagers: it takes the configured items, buys the configured offer, and puts the configured results into the output containers in order. It stops at the first output that can take what is left. Clicks are spaced by the delay setting.
+7. While the route is running, movement, jump, sneak, attack, use, drop, inventory, and the hotbar are locked. Chat, the command key, the player list, screenshots, and fullscreen stay available. `Esc` opens the pause menu and the status becomes `autotrading: stop` while the route waits. Click that status to turn the route off; it becomes `autotrading: disabled`. Death turns the route off as well.
 
 An empty input or a villager who is out of stock makes the character wait. A missing path, a full output, a missing target, or a bad item id shows a notice and plays a bell. The mod writes nothing to chat and adds no commands.
 
@@ -69,6 +69,7 @@ An empty input or a villager who is out of stock makes the character wait. A mis
 | Trade | 1 `minecraft:melon` for 1 `minecraft:emerald` |
 | Second cost | empty |
 | Items to put away | `minecraft:emerald` |
+| Delay between actions | 10 ticks (20 ticks is one second) |
 
 The trade matches the villager's discounted price, the number drawn without a strikethrough. A different count is not bought. An out-of-stock offer waits. An empty input waits. Full outputs, a missing target, a missing path, death, and a bad item id show a notice and play a bell. Nothing is written to chat, and the mod adds no commands.
 

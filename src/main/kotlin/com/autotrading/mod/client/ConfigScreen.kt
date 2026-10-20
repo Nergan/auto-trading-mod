@@ -85,6 +85,13 @@ object ConfigScreen {
                 .build(),
         )
         category.addEntry(
+            entries.startIntSlider(Component.translatable("autotrading.configuration.pace"), Settings.pace, 2, 40)
+                .setDefaultValue(10)
+                .setTooltip(Component.translatable("autotrading.configuration.pace.tooltip"))
+                .setSaveConsumer { Settings.pace = it }
+                .build(),
+        )
+        category.addEntry(
             entries.startBooleanToggle(Component.translatable("autotrading.configuration.enabled"), Settings.enabled)
                 .setDefaultValue(false)
                 .setSaveConsumer { Settings.enabled = it }

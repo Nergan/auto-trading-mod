@@ -34,10 +34,13 @@ object Settings {
     var costBCount = 0
     var result = "minecraft:emerald"
     var resultCount = 1
+    var pace = 10
     val deposit = ArrayList<String>()
     private val worlds = HashMap<String, Route>()
 
     fun recipe() = Recipe(costA, costACount, costB, costBCount, result, resultCount)
+
+    fun paceTicks() = pace.coerceIn(2, 40)
 
     fun route(world: String): Route = worlds.getOrPut(world) { Route() }
 
@@ -65,6 +68,7 @@ object Settings {
         costBCount = root.int("costBCount", 0).coerceAtLeast(0)
         result = root.str("result", "minecraft:emerald")
         resultCount = root.int("resultCount", 1).coerceAtLeast(1)
+        pace = root.int("pace", 10).coerceIn(2, 40)
         deposit.clear()
         deposit.addAll(root.strings("deposit"))
         if (deposit.isEmpty()) deposit.add("minecraft:emerald")
@@ -93,6 +97,7 @@ object Settings {
         root.addProperty("costBCount", costBCount)
         root.addProperty("result", result)
         root.addProperty("resultCount", resultCount)
+        root.addProperty("pace", paceTicks())
         root.add("deposit", strings(deposit))
         val saved = JsonObject()
         for ((key, route) in worlds) {
