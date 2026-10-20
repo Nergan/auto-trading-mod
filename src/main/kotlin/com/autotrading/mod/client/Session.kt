@@ -200,7 +200,7 @@ object Session {
         }
         val forced = move
         val minecraft = Minecraft.getInstance()
-        if (forced == null || !forced.forward || minecraft.isPaused || foreign(minecraft)) {
+        if (forced == null || !forced.forward || held(minecraft)) {
             return net.minecraft.world.entity.player.Input.EMPTY
         }
         return net.minecraft.world.entity.player.Input(true, false, false, false, forced.jump, false, forced.sprint)
@@ -299,7 +299,8 @@ object Session {
             return
         }
         suppressAutoJump(minecraft)
-        if (minecraft.isPaused || foreign(minecraft)) {
+        if (away(minecraft) && minecraft.gui.screen() is PauseScreen) minecraft.gui.setScreen(null)
+        if (held(minecraft)) {
             move = null
             return
         }
@@ -879,6 +880,15 @@ object Session {
         if (level.getBlockEntity(pos) is Container) return true
         val block = level.getBlockState(pos).block
         return block is CraftingTableBlock || block is EnderChestBlock
+    }
+
+    /** The window is in the background and the route should keep running. */
+    private fun away(minecraft: Minecraft) = Settings.enabled && !minecraft.isWindowActive
+
+    /** Esc pauses the route. A pause menu opened by leaving the window does not. */
+    private fun held(minecraft: Minecraft): Boolean {
+        if (away(minecraft)) return false
+        return minecraft.isPaused || foreign(minecraft)
     }
 
     private fun foreign(minecraft: Minecraft): Boolean {
