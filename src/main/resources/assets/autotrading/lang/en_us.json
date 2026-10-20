@@ -35,5 +35,8 @@
   "autotrading.action.taking": "taking items",
   "autotrading.action.trading": "trading",
   "autotrading.action.putting": "putting items away",
-  "autotrading.action.restock": "waiting for restock"
+  "autotrading.action.restock": "waiting for restock",
+  "autotrading.action.eating": "eating",
+  "autotrading.action.hungry": "hungry",
+  "autotrading.notice.hungry": "Autotrading is waiting: one hunger shank is left and the inventory has no food."
 }

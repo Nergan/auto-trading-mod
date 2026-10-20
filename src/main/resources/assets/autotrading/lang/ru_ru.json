@@ -35,5 +35,8 @@
   "autotrading.action.taking": "берёт предметы",
   "autotrading.action.trading": "торгует",
   "autotrading.action.putting": "кладёт предметы",
-  "autotrading.action.restock": "ожидание пополнения"
+  "autotrading.action.restock": "ожидание пополнения",
+  "autotrading.action.eating": "ест",
+  "autotrading.action.hungry": "голодает",
+  "autotrading.notice.hungry": "Автоторговля стоит: осталась одна ножка сытости, а еды в инвентаре нет."
 }

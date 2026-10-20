@@ -1,6 +1,8 @@
 package com.autotrading.mod.client
 
+import com.autotrading.mod.logic.Hunger
 import com.autotrading.mod.logic.OfferView
+import com.autotrading.mod.logic.hungerAction
 import com.autotrading.mod.logic.Pile
 import com.autotrading.mod.logic.Price
 import com.autotrading.mod.logic.Recipe
@@ -25,6 +27,7 @@ import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen
 import net.minecraft.client.gui.screens.inventory.InventoryScreen
 import net.minecraft.client.gui.screens.inventory.MerchantScreen
 import net.minecraft.core.BlockPos
+import net.minecraft.core.component.DataComponents
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
 import net.minecraft.resources.Identifier
@@ -33,6 +36,7 @@ import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.npc.villager.AbstractVillager
 import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader
+import net.minecraft.world.entity.player.Inventory
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.inventory.ContainerInput
 import net.minecraft.world.Container
@@ -51,6 +55,7 @@ object Session {
     private enum class Phase { DISABLED, INPUTS, VILLAGERS, OUTPUTS }
     private enum class Job { IDLE, CHOOSE, WALK, OPEN, TAKE, TRADE, PUT, WAIT }
     private enum class Mode { FETCH, SELL, STORE }
+    private enum class Bite { NONE, CHEW }
 
     private var phase = Phase.DISABLED
     private val draftInputs = ArrayList<Mark>()
@@ -77,6 +82,9 @@ object Session {
     private var pendingSlot = -1
     private var pendingCount = -1
     private var pendingAt = 0
+    private var bite = Bite.NONE
+    private var chewUntil = 0
+    private var filling = false
     private var tradeStep = 0
     private var tradeFails = 0
     private var tradeMarked = 0
@@ -216,7 +224,6 @@ object Session {
         val options = minecraft.options
         val keys = listOf(
             options.keyAttack,
-            options.keyUse,
             options.keyDrop,
             options.keyInventory,
             options.keySwapOffhand,
@@ -227,6 +234,14 @@ object Session {
             if (key.isDown) pressed = true
             key.setDown(false)
             key.consumeClick()
+        }
+        val use = options.keyUse
+        if (bite == Bite.CHEW) {
+            use.setDown(true)
+        } else {
+            if (use.isDown) pressed = true
+            use.setDown(false)
+            use.consumeClick()
         }
         if (pressed) Alerts.lock()
     }
@@ -309,6 +324,7 @@ object Session {
             move = null
             return
         }
+        if (feed(minecraft, player)) return
         val level = minecraft.level ?: return
         when (job) {
             Job.IDLE, Job.CHOOSE -> choose(minecraft, player)
@@ -822,7 +838,112 @@ object Session {
         restoreChat = false
         pendingSlot = -1
         resumeSell = -1
+        stopEating(minecraft)
         if (minecraft.gui.screen() is AbstractContainerScreen<*>) minecraft.player?.closeContainer()
+    }
+
+    private fun feed(minecraft: Minecraft, player: Player): Boolean {
+        if (bite == Bite.CHEW && player.isUsingItem) {
+            move = null
+            actionKey = "autotrading.action.eating"
+            return true
+        }
+        val level = player.foodData.foodLevel
+        if (level > 2) told.remove("hungry")
+        val hasFood = findFood(player) >= 0
+        when (hungerAction(level, hasFood, filling)) {
+            Hunger.WORK -> {
+                filling = false
+                stopEating(minecraft)
+                return false
+            }
+            Hunger.STOP -> {
+                filling = false
+                stopEating(minecraft)
+                move = null
+                actionKey = "autotrading.action.hungry"
+                once("hungry") { Alerts.show("autotrading.notice.hungry") }
+                return true
+            }
+            Hunger.EAT -> {
+                filling = true
+                return chew(minecraft, player)
+            }
+        }
+    }
+
+    private fun chew(minecraft: Minecraft, player: Player): Boolean {
+        move = null
+        actionKey = "autotrading.action.eating"
+        if (bite == Bite.CHEW) {
+            if (player.isUsingItem || clock < chewUntil) return true
+            bite = Bite.NONE
+        } else if (clock < chewUntil) {
+            return true
+        }
+        val screen = minecraft.gui.screen()
+        if (screen is AbstractContainerScreen<*>) {
+            if (job == Job.TAKE || job == Job.TRADE || job == Job.PUT) job = Job.OPEN
+            closeWork(minecraft)
+            return true
+        }
+        val index = findFood(player)
+        if (index < 0) return false
+        val hand = equip(minecraft, player, index) ?: return true
+        val stack = player.getItemInHand(hand)
+        val duration = stack.getUseDuration(player).coerceAtLeast(1)
+        minecraft.gameMode?.useItem(player, hand)
+        if (!player.isUsingItem) {
+            chewUntil = clock + Settings.paceTicks()
+            return false
+        }
+        bite = Bite.CHEW
+        chewUntil = clock + duration + 8
+        return true
+    }
+
+    private fun equip(minecraft: Minecraft, player: Player, index: Int): InteractionHand? {
+        if (index == Inventory.SLOT_OFFHAND) return InteractionHand.OFF_HAND
+        val inventory = player.inventory
+        if (index in 0..8) {
+            inventory.setSelectedSlot(index)
+            return InteractionHand.MAIN_HAND
+        }
+        val menuIndex = player.containerMenu.slots.indexOfFirst {
+            it.container === inventory && it.containerSlot == index
+        }
+        if (menuIndex < 0) return null
+        minecraft.gameMode?.handleContainerInput(
+            player.containerMenu.containerId,
+            menuIndex,
+            inventory.selectedSlot,
+            ContainerInput.SWAP,
+            player,
+        )
+        return InteractionHand.MAIN_HAND
+    }
+
+    private fun findFood(player: Player): Int {
+        val items = player.inventory.nonEquipmentItems
+        for (index in items.indices) {
+            if (edible(player, items[index])) return index
+        }
+        if (edible(player, player.inventory.getItem(Inventory.SLOT_OFFHAND))) return Inventory.SLOT_OFFHAND
+        return -1
+    }
+
+    private fun edible(player: Player, stack: ItemStack): Boolean {
+        if (stack.isEmpty) return false
+        val food = stack.get(DataComponents.FOOD) ?: return false
+        return food.nutrition() > 0 && player.canEat(food.canAlwaysEat())
+    }
+
+    private fun stopEating(minecraft: Minecraft) {
+        val player = minecraft.player
+        if (bite == Bite.CHEW && player != null && player.isUsingItem) minecraft.gameMode?.releaseUsingItem(player)
+        bite = Bite.NONE
+        chewUntil = 0
+        filling = false
     }
 
     private fun clickSlot(minecraft: Minecraft, player: Player, slot: Int) {
