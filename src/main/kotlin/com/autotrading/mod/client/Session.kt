@@ -1,8 +1,16 @@
 package com.autotrading.mod.client
 
 import com.autotrading.mod.logic.OfferView
+import com.autotrading.mod.logic.Step
 import com.autotrading.mod.logic.canPay
 import com.autotrading.mod.logic.fit
+import com.autotrading.mod.logic.keepsReserve
+import com.autotrading.mod.logic.nextStep
+import com.autotrading.mod.logic.StockKind
+import com.autotrading.mod.logic.definitelyEmpty
+import com.autotrading.mod.logic.noteEmpty
+import com.autotrading.mod.logic.noteInStock
+import com.autotrading.mod.logic.shouldFetch
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.ChatScreen
 import net.minecraft.client.gui.screens.PauseScreen
@@ -18,6 +26,7 @@ import net.minecraft.network.protocol.game.ServerboundSelectTradePacket
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.npc.villager.AbstractVillager
+import net.minecraft.world.entity.npc.wanderingtrader.WanderingTrader
 import net.minecraft.world.entity.player.Inventory
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.inventory.ContainerInput
@@ -68,6 +77,7 @@ object Session {
     private var tradeMarked = 0
     private var tradeState = 0
     private var tradeSnapshot = 0
+    private var resumeSell = -1
     private var sawLocked = false
     private val told = HashSet<String>()
     private var autoJumpWas: Boolean? = null
@@ -245,6 +255,7 @@ object Session {
         }
         told.clear()
         cursor = 0
+        resumeSell = -1
         job = Job.CHOOSE
         Walker.clear()
         move = null
@@ -312,47 +323,19 @@ object Session {
     }
 
     private fun choose(minecraft: Minecraft, player: Player) {
-        val level = minecraft.level ?: return
-        val dim = level.dimension().identifier().toString()
-        val route = Settings.route(Settings.worldKey(minecraft))
-        inputs = route.inputs.filter { it.dimension == dim }
-        villagers = route.villagers.filter { it.dimension == dim }
-        outputs = route.outputs.filter { it.dimension == dim }
-        if (inputs.isEmpty() || villagers.isEmpty() || outputs.isEmpty()) {
+        if (!routeReady(minecraft)) {
+            val route = Settings.route(Settings.worldKey(minecraft))
             val elsewhere = route.inputs.isNotEmpty() || route.villagers.isNotEmpty() || route.outputs.isNotEmpty()
             Alerts.show(if (elsewhere) "autotrading.notice.dimension" else "autotrading.notice.need_route")
             park(40, "autotrading.action.waiting")
             return
         }
-        val recipe = Settings.recipe()
-        val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
-        val resultFits = fits(player, recipe.result, recipe.resultCount)
-        val deposit = Settings.deposit.sumOf { count(player, it) }
-        when {
-            payable && resultFits -> {
-                mode = Mode.SELL
-                cursor = 0
-                job = Job.WALK
-                Walker.clear()
-                actionKey = "autotrading.action.walking"
-            }
-            !payable && Settings.pickup.any { fits(player, it, 1) } -> {
-                mode = Mode.FETCH
-                cursor = 0
-                job = Job.WALK
-                Walker.clear()
-                actionKey = "autotrading.action.walking"
-            }
-            deposit > 0 -> {
-                mode = Mode.STORE
-                cursor = 0
-                job = Job.WALK
-                Walker.clear()
-                actionKey = "autotrading.action.walking"
-            }
-            else -> {
-                val room = Settings.pickup.any { fits(player, it, 1) }
-                if (!room || !resultFits) Alerts.show("autotrading.notice.full_inventory")
+        when (plan(player)) {
+            Step.FETCH -> startWalk(minecraft, Mode.FETCH, 0)
+            Step.SELL -> startWalk(minecraft, Mode.SELL, 0)
+            Step.STORE -> startWalk(minecraft, Mode.STORE, 0)
+            Step.WAIT -> {
+                if (emptySlots(player) == 0) Alerts.show("autotrading.notice.full_inventory")
                 park(40, "autotrading.action.waiting")
             }
         }
@@ -437,33 +420,21 @@ object Session {
 
     private fun take(minecraft: Minecraft, player: Player) {
         actionKey = "autotrading.action.taking"
-        val recipe = Settings.recipe()
-        if (canPay(count(player, recipe.costA), count(player, recipe.costB), recipe) && fits(player, recipe.result, recipe.resultCount)) {
-            closeWork(minecraft)
-            job = Job.CHOOSE
-            return
-        }
-        if (Settings.pickup.none { fits(player, it, 1) }) {
-            closeWork(minecraft)
-            if (Settings.deposit.sumOf { count(player, it) } > 0) job = Job.CHOOSE
-            else {
-                Alerts.show("autotrading.notice.full_inventory")
-                park(40, "autotrading.action.waiting")
-            }
-            return
-        }
         if (pendingSlot >= 0) {
             if (clock < pendingAt) return
             pendingSlot = -1
         }
         if (clock < pendingAt) return
         val menu = player.containerMenu
-        val slot = menu.slots.withIndex().firstOrNull { (_, entry) ->
-            entry.container !== player.inventory && Settings.pickup.contains(idOf(entry.item))
+        val available = menu.slots.withIndex().filter { (_, entry) ->
+            entry.container !== player.inventory && Settings.pickup.contains(idOf(entry.item)) && !entry.item.isEmpty
+        }
+        val slot = available.firstOrNull { (_, entry) ->
+            keepsReserve(emptySlots(player), mergeRoom(player, idOf(entry.item)), entry.item.count, entry.item.maxStackSize)
         }
         if (slot == null) {
             closeWork(minecraft)
-            skip(minecraft)
+            if (available.isEmpty()) skip(minecraft) else afterInputs(minecraft, player)
             return
         }
         clickSlot(minecraft, player, slot.index)
@@ -507,9 +478,13 @@ object Session {
             if (tradeFails >= 4) skip(minecraft)
             return
         }
-        if (!canPay(count(player, recipe.costA), count(player, recipe.costB), recipe) || !fits(player, recipe.result, recipe.resultCount)) {
+        val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
+        val resultFits = fits(player, recipe.result, recipe.resultCount)
+        if (!payable || !resultFits) {
             closeWork(minecraft)
-            job = Job.CHOOSE
+            resumeSell = cursor
+            if (Settings.deposit.sumOf { count(player, it) } > 0) startWalk(minecraft, Mode.STORE, 0)
+            else afterVillagers(minecraft, player)
             return
         }
         var match = -1
@@ -525,10 +500,16 @@ object Session {
             }
         }
         if (match < 0) {
-            if (locked) sawLocked = true else once("offer:" + targetKey()) { Alerts.show("autotrading.notice.no_offer") }
+            if (locked) {
+                sawLocked = true
+                rememberOffer(minecraft, false)
+            } else {
+                once("offer:" + targetKey()) { Alerts.show("autotrading.notice.no_offer") }
+            }
             skip(minecraft)
             return
         }
+        rememberOffer(minecraft, true)
         selectOffer(screen, match)
         tradeStep = 1
         tradeState = menu.stateId
@@ -552,7 +533,7 @@ object Session {
         actionKey = "autotrading.action.putting"
         if (Settings.deposit.sumOf { count(player, it) } == 0) {
             closeWork(minecraft)
-            job = Job.CHOOSE
+            afterOutputs(minecraft, player)
             return
         }
         val menu = player.containerMenu
@@ -580,7 +561,7 @@ object Session {
         }
         if (slot == null) {
             closeWork(minecraft)
-            job = Job.CHOOSE
+            afterOutputs(minecraft, player)
             return
         }
         pendingSlot = slot.index
@@ -632,23 +613,177 @@ object Session {
     private fun skip(minecraft: Minecraft) {
         closeWork(minecraft)
         cursor++
+        if (mode == Mode.SELL) {
+            val resolved = openVillager(minecraft, cursor)
+            if (resolved < 0) {
+                val player = minecraft.player ?: return
+                afterVillagers(minecraft, player)
+                return
+            }
+            cursor = resolved
+            job = Job.WALK
+            Walker.clear()
+            return
+        }
         val size = when (mode) {
             Mode.FETCH -> inputs.size
             Mode.SELL -> villagers.size
             Mode.STORE -> outputs.size
         }
-        if (size == 0 || cursor >= size) {
-            cursor = 0
-            val restock = mode == Mode.SELL && sawLocked
-            sawLocked = false
-            park(if (restock) 80 else 40, if (restock) "autotrading.action.restock" else "autotrading.action.waiting")
-        } else {
+        if (cursor < size) {
             job = Job.WALK
             Walker.clear()
+            return
+        }
+        val player = minecraft.player ?: return
+        when (mode) {
+            Mode.FETCH -> afterInputs(minecraft, player)
+            Mode.SELL -> afterVillagers(minecraft, player)
+            Mode.STORE -> afterOutputs(minecraft, player)
         }
     }
 
+    private fun afterInputs(minecraft: Minecraft, player: Player) {
+        val recipe = Settings.recipe()
+        val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
+        val resultFits = fits(player, recipe.result, recipe.resultCount)
+        when {
+            payable && resultFits -> {
+                val index = resumeSell.takeIf { it in villagers.indices } ?: 0
+                resumeSell = -1
+                startWalk(minecraft, Mode.SELL, index)
+            }
+            Settings.deposit.sumOf { count(player, it) } > 0 -> startWalk(minecraft, Mode.STORE, 0)
+            else -> park(40, "autotrading.action.waiting")
+        }
+    }
+
+    private fun afterVillagers(minecraft: Minecraft, player: Player) {
+        val recipe = Settings.recipe()
+        val payable = canPay(count(player, recipe.costA), count(player, recipe.costB), recipe)
+        when {
+            Settings.deposit.sumOf { count(player, it) } > 0 -> startWalk(minecraft, Mode.STORE, 0)
+            !payable && shouldFetch(emptySlots(player), hasPartialPickup(player)) -> startWalk(minecraft, Mode.FETCH, 0)
+            openVillager(minecraft, 0) < 0 -> park(100, "autotrading.action.restock")
+            sawLocked -> park(80, "autotrading.action.restock")
+            else -> park(40, "autotrading.action.waiting")
+        }
+    }
+
+    private fun afterOutputs(minecraft: Minecraft, player: Player) {
+        val recipe = Settings.recipe()
+        if (resumeSell in villagers.indices &&
+            canPay(count(player, recipe.costA), count(player, recipe.costB), recipe) &&
+            fits(player, recipe.result, recipe.resultCount)
+        ) {
+            val index = resumeSell
+            resumeSell = -1
+            startWalk(minecraft, Mode.SELL, index)
+            return
+        }
+        when (plan(player)) {
+            Step.FETCH -> startWalk(minecraft, Mode.FETCH, 0)
+            Step.SELL -> {
+                resumeSell = -1
+                startWalk(minecraft, Mode.SELL, 0)
+            }
+            Step.STORE -> startWalk(minecraft, Mode.STORE, 0)
+            Step.WAIT -> park(if (sawLocked) 80 else 40, if (sawLocked) "autotrading.action.restock" else "autotrading.action.waiting")
+        }
+    }
+
+    private fun startWalk(minecraft: Minecraft, next: Mode, index: Int) {
+        if (!routeReady(minecraft)) {
+            val route = Settings.route(Settings.worldKey(minecraft))
+            val elsewhere = route.inputs.isNotEmpty() || route.villagers.isNotEmpty() || route.outputs.isNotEmpty()
+            Alerts.show(if (elsewhere) "autotrading.notice.dimension" else "autotrading.notice.need_route")
+            park(40, "autotrading.action.waiting")
+            return
+        }
+        if (next == Mode.SELL) {
+            if (index == 0) {
+                sawLocked = false
+                resumeSell = -1
+            }
+            val resolved = openVillager(minecraft, index)
+            if (resolved < 0) {
+                val holder = minecraft.player
+                if (holder != null && Settings.deposit.sumOf { count(holder, it) } > 0) startWalk(minecraft, Mode.STORE, 0)
+                else park(100, "autotrading.action.restock")
+                return
+            }
+            mode = next
+            cursor = resolved
+            job = Job.WALK
+            Walker.clear()
+            actionKey = "autotrading.action.walking"
+            return
+        }
+        mode = next
+        cursor = index
+        job = Job.WALK
+        Walker.clear()
+        actionKey = "autotrading.action.walking"
+    }
+
+    /** Next villager who might have the offer. A blocked villager is not pathed to. */
+    private fun openVillager(minecraft: Minecraft, start: Int): Int {
+        val clocks = worldClocks(minecraft) ?: return start.takeIf { it in villagers.indices } ?: -1
+        val (game, day) = clocks
+        val world = Settings.worldKey(minecraft)
+        for (index in start until villagers.size) {
+            val note = Settings.stock(world, villagers[index].uuid)
+            if (!definitelyEmpty(note, game, day)) return index
+        }
+        return -1
+    }
+
+    private fun rememberOffer(minecraft: Minecraft, inStock: Boolean) {
+        val clocks = worldClocks(minecraft) ?: return
+        val mark = villagers.getOrNull(cursor) ?: return
+        val (game, day) = clocks
+        val entity = minecraft.level?.let { findVillager(it, mark) }
+        val kind = if (entity is WanderingTrader) StockKind.WANDERER else StockKind.VILLAGER
+        val world = Settings.worldKey(minecraft)
+        val note = Settings.stock(world, mark.uuid)
+        val next = if (inStock) noteInStock(note, kind, game, day) else noteEmpty(note, kind, game, day)
+        if (next == note) return
+        Settings.putStock(world, mark.uuid, next)
+        Settings.save()
+    }
+
+    /** Game time and the overworld clock. A missing clock must not invent a long skip. */
+    private fun worldClocks(minecraft: Minecraft): Pair<Long, Long>? {
+        val level = minecraft.level ?: return null
+        val game = level.gameTime
+        val day = level.overworldClockTime
+        if (day <= 0L && game > 0L) return null
+        return game to day
+    }
+
+    private fun routeReady(minecraft: Minecraft): Boolean {
+        val level = minecraft.level ?: return false
+        val dim = level.dimension().identifier().toString()
+        val route = Settings.route(Settings.worldKey(minecraft))
+        inputs = route.inputs.filter { it.dimension == dim }
+        villagers = route.villagers.filter { it.dimension == dim }
+        outputs = route.outputs.filter { it.dimension == dim }
+        return inputs.isNotEmpty() && villagers.isNotEmpty() && outputs.isNotEmpty()
+    }
+
+    private fun plan(player: Player): Step {
+        val recipe = Settings.recipe()
+        return nextStep(
+            emptySlots(player),
+            hasPartialPickup(player),
+            canPay(count(player, recipe.costA), count(player, recipe.costB), recipe),
+            fits(player, recipe.result, recipe.resultCount),
+            Settings.deposit.sumOf { count(player, it) },
+        )
+    }
+
     private fun park(ticks: Int, key: String) {
+        resumeSell = -1
         job = Job.WAIT
         waitUntil = clock + ticks
         actionKey = key
@@ -675,6 +810,7 @@ object Session {
         reopenChat = false
         restoreChat = false
         pendingSlot = -1
+        resumeSell = -1
         if (minecraft.gui.screen() is AbstractContainerScreen<*>) minecraft.player?.closeContainer()
     }
 
@@ -762,6 +898,16 @@ object Session {
     private fun once(key: String, alert: () -> Unit) {
         if (told.add(key)) alert()
     }
+
+    private fun emptySlots(player: Player) = stacks(player).count { it.isEmpty }
+
+    private fun hasPartialPickup(player: Player): Boolean =
+        stacks(player).any { stack ->
+            !stack.isEmpty && Settings.pickup.contains(idOf(stack)) && stack.count < stack.maxStackSize
+        }
+
+    private fun mergeRoom(player: Player, id: String): Int =
+        stacks(player).filter { idOf(it) == id }.sumOf { (it.maxStackSize - it.count).coerceAtLeast(0) }
 
     private fun count(player: Player, id: String): Int {
         if (id.isBlank()) return 0

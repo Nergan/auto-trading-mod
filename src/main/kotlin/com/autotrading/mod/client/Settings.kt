@@ -1,6 +1,8 @@
 package com.autotrading.mod.client
 
 import com.autotrading.mod.logic.Recipe
+import com.autotrading.mod.logic.StockKind
+import com.autotrading.mod.logic.StockNote
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -37,12 +39,21 @@ object Settings {
     var pace = 10
     val deposit = ArrayList<String>()
     private val worlds = HashMap<String, Route>()
+    private val stocks = HashMap<String, MutableMap<String, StockNote>>()
 
     fun recipe() = Recipe(costA, costACount, costB, costBCount, result, resultCount)
 
     fun paceTicks() = pace.coerceIn(2, 40)
 
     fun route(world: String): Route = worlds.getOrPut(world) { Route() }
+
+    fun stock(world: String, uuid: String): StockNote = stocks[world]?.get(uuid.lowercase()) ?: StockNote()
+
+    fun putStock(world: String, uuid: String, note: StockNote) {
+        val key = uuid.lowercase()
+        val map = stocks.getOrPut(world) { HashMap() }
+        if (note == StockNote()) map.remove(key) else map[key] = note
+    }
 
     fun knownItems(): Boolean {
         val ids = pickup + deposit + listOf(costA, result) + if (costB.isBlank()) emptyList() else listOf(costB)
@@ -73,6 +84,7 @@ object Settings {
         deposit.addAll(root.strings("deposit"))
         if (deposit.isEmpty()) deposit.add("minecraft:emerald")
         worlds.clear()
+        stocks.clear()
         if (!root.has("worlds")) return
         val saved = root.getAsJsonObject("worlds")
         for (entry in saved.entrySet()) {
@@ -82,6 +94,9 @@ object Settings {
             route.outputs.addAll(body.marks("outputs"))
             route.villagers.addAll(body.villagers("villagers"))
             worlds[entry.key] = route
+            val remembered = HashMap<String, StockNote>()
+            for ((uuid, note) in body.stock()) remembered[uuid] = note
+            if (remembered.isNotEmpty()) stocks[entry.key] = remembered
         }
     }
 
@@ -105,6 +120,9 @@ object Settings {
             body.add("inputs", route.inputs.map { it.json() }.toJson())
             body.add("outputs", route.outputs.map { it.json() }.toJson())
             body.add("villagers", route.villagers.map { it.json() }.toJson())
+            val known = route.villagers.map { it.uuid.lowercase() }.toSet()
+            val remembered = stocks[key].orEmpty().filter { it.key in known && it.value != StockNote() }
+            if (remembered.isNotEmpty()) body.add("stock", remembered.map { (uuid, note) -> note.json(uuid) }.toJson())
             saved.add(key, body)
         }
         root.add("worlds", saved)
@@ -140,6 +158,8 @@ private fun JsonObject.str(name: String, fallback: String) = if (has(name)) get(
 
 private fun JsonObject.int(name: String, fallback: Int) = if (has(name)) get(name).asInt else fallback
 
+private fun JsonObject.long(name: String, fallback: Long) = if (has(name)) get(name).asLong else fallback
+
 private fun JsonObject.strings(name: String): List<String> {
     if (!has(name)) return emptyList()
     return getAsJsonArray(name).map { it.asString.trim() }.filter { it.isNotEmpty() }
@@ -172,6 +192,33 @@ private fun Mark.json() = JsonObject().apply {
     addProperty("x", x)
     addProperty("y", y)
     addProperty("z", z)
+}
+
+private fun JsonObject.stock(): List<Pair<String, StockNote>> {
+    if (!has("stock")) return emptyList()
+    return getAsJsonArray("stock").mapNotNull { element ->
+        val body = element.asJsonObject
+        val uuid = body.str("uuid", "").lowercase()
+        if (uuid.isEmpty()) return@mapNotNull null
+        uuid to StockNote(
+            kind = if (body.str("kind", "villager") == "wanderer") StockKind.WANDERER else StockKind.VILLAGER,
+            seen = body.int("seen", 0).coerceIn(0, 2),
+            empty = body.bool("empty", false),
+            emptyGame = body.long("emptyGame", 0),
+            emptyDay = body.long("emptyDay", 0),
+            restockGame = body.long("restockGame", 0),
+        )
+    }
+}
+
+private fun StockNote.json(uuid: String) = JsonObject().apply {
+    addProperty("uuid", uuid)
+    addProperty("kind", if (kind == StockKind.WANDERER) "wanderer" else "villager")
+    addProperty("seen", seen)
+    addProperty("empty", empty)
+    addProperty("emptyGame", emptyGame)
+    addProperty("emptyDay", emptyDay)
+    addProperty("restockGame", restockGame)
 }
 
 private fun VillagerMark.json() = JsonObject().apply {
